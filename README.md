@@ -19,17 +19,19 @@ The ground truth comes from a finite-volume solver (1D axial, 9 carbon discs, Ga
 
 ## Repository layout
 
-| File | Role |
-|---|---|
-| `brake_stack_fd.py` | 1D finite-volume reference solver, exports the synthetic dataset |
-| `brake_stack_fd_2d.py` | 2D axisymmetric validation solver |
-| `brake_stack_pinn_v2.py` | Direct PINN, Green's function ansatz, 0 to 300 s |
-| `brake_stack_pinn_v3.py` | Long window (2 h), exact cosine series, log-time input |
-| `brake_stack_pinn_v4_nonlin.py` | Nonlinear k(T), cp(T), self-balanced losses |
-| `brake_stack_pinn_param_colab.py` | Parametric PINN over 5 physical parameters |
-| `brake_stack_day.py` | Full day of rotations by chaining the parametric model |
-| `brake_stack_inverse.py` | Inverse problem and identifiability study |
-| `report/rapport_pinn_freins.pdf` | Full write-up (French) |
+```text
+.
+├── brake_stack_fd.py               # 1D finite-volume reference solver, exports the synthetic dataset
+├── brake_stack_fd_2d.py            # 2D axisymmetric validation solver
+├── brake_stack_pinn_v2.py          # Direct PINN, Green's function ansatz, 0 to 300 s
+├── brake_stack_pinn_v3.py          # Long window (2 h), exact cosine series, log-time input
+├── brake_stack_pinn_v4_nonlin.py   # Nonlinear k(T), cp(T), self-balanced losses
+├── brake_stack_pinn_param_colab.py # Parametric PINN over 5 physical parameters
+├── brake_stack_day.py              # Full day of rotations by chaining the parametric model
+├── brake_stack_inverse.py          # Inverse problem and identifiability study
+├── docs/                           # Figures
+└── report/rapport_pinn_freins.pdf  # Full write-up (French)
+```
 
 ## Run it
 
