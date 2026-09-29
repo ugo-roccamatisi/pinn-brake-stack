@@ -1,23 +1,23 @@
 """
-JOURNEE COMPLETE : enchainement du PINN parametrique sur plusieurs rotations.
+FULL DAY: chaining the parametric PINN over several rotations.
 
-Recycle brake_stack_pinn_param.pt (entraine par brake_stack_pinn_param.py,
-place dans le meme dossier) SANS aucun reentrainement. Chaque rotation est
-decoupee selon l'echelle physique dominante :
+Reuses brake_stack_pinn_param.pt (trained by brake_stack_pinn_param.py,
+placed in the same folder) WITHOUT any retraining. Each rotation is
+split according to the dominant physical scale:
 
-  1. atterrissage + taxi-in (8 min)  : PINN parametrique (pics, gradients)
-  2. impulsions de freinage de taxi  : increments adiabatiques uniformes
-                                       dT = E_taxi / (m cp) (trop lents pour
-                                       creer un gradient axial)
-  3. parking porte (h_sol) et vol (h_vol) : mode propre de Robin le plus lent,
-     T - T_amb ~ exp(-lambda t) avec lambda = alpha mu0^2/L^2 + s_lat/(rho cp)
-     et mu0 tan(mu0/2) = Bi. Exact pour un champ uniforme en physique lineaire,
-     ce qui est le cas 5 min apres un freinage (profils plats verifies).
+  1. landing + taxi-in (8 min)       : parametric PINN (peaks, gradients)
+  2. taxi braking pulses             : uniform adiabatic increments
+                                       dT = E_taxi / (m cp) (too slow to
+                                       create an axial gradient)
+  3. gate parking (h_ground) and flight (h_flight): slowest Robin eigenmode,
+     T - T_amb ~ exp(-lambda t) with lambda = alpha mu0^2/L^2 + s_lat/(rho cp)
+     and mu0 tan(mu0/2) = Bi. Exact for a uniform field in linear physics,
+     which is the case 5 min after braking (flat profiles checked).
 
-La temperature de fin de segment devient le T_init du segment suivant : c'est
-exactement le role du parametre T_init de la boite d'entrainement.
-Verification operationnelle : temperature capteur a chaque decollage comparee
-a la limite A320 de 150 C (freins trop chauds = decollage interdit).
+The temperature at the end of a segment becomes the T_init of the next one: this
+is exactly the role of the T_init parameter of the training box.
+Operational check: sensor temperature at each takeoff compared with
+the A320 limit of 150 C (brakes too hot = takeoff not allowed).
 """
 
 import numpy as np
@@ -25,9 +25,9 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-# Tailles de police dimensionnees pour l'insertion dans le rapport : LaTeX
-# ramene la figure a ~6.1 pouces de large, donc la police effective vaut
-# fontsize x 6.1 / figsize_largeur. Objectif ~8.5 pt une fois imprime.
+# Font sizes chosen for the report: LaTeX scales the figure to ~6.1 inches
+# wide, so the effective font size is
+# fontsize x 6.1 / figsize_width. Target ~8.5 pt once printed.
 plt.rcParams.update({'font.size': 16, 'axes.titlesize': 16, 'axes.labelsize': 16,
                      'xtick.labelsize': 14, 'ytick.labelsize': 14,
                      'legend.fontsize': 11, 'lines.linewidth': 1.8})
@@ -38,7 +38,7 @@ DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE = torch.float32
 
 # ================================================================ definitions
-# IDENTIQUES a brake_stack_pinn_param.py (necessaires pour recharger le .pt)
+# IDENTICAL to brake_stack_pinn_param.py (required to reload the .pt)
 N_DISC, E_DISC = 9, 0.025
 L = N_DISC * E_DISC
 R_EXT, R_INT = 0.20, 0.12
@@ -57,7 +57,7 @@ DT_REF = P_HI[0] * 1e6 / (RHO * A_SEC * L * CP0)
 FO = ALPHA_D * T_WINDOW / L**2
 SIG_HAT = SIGMA_Q / L
 ZI_HAT = torch.tensor(Z_INT / L, dtype=DTYPE, device=DEV)
-M_STACK = RHO * A_SEC * L                      # kg (masse de la pile)
+M_STACK = RHO * A_SEC * L                      # kg (stack mass)
 
 def unpack(p):
     E = p[:, 0:1] * 1e6
@@ -124,16 +124,16 @@ try:
     drive.mount('/content/drive')
     CKPT = '/content/drive/MyDrive/brake_stack_pinn_param.pt'
 except Exception as e:
-    print("Drive non monte (", e, ") : recherche du .pt en local")
+    print("Drive not mounted (", e, "): looking for the .pt locally")
 if not os.path.exists(CKPT):
-    CKPT = 'brake_stack_pinn_param.pt'   # repli : fichier televerse dans la session
+    CKPT = 'brake_stack_pinn_param.pt'   # fallback: file uploaded to the session
 model = ParamPINN().to(DEV)
 model.load_state_dict(torch.load(CKPT, map_location=DEV))
 model.eval()
-print("Modele charge depuis :", CKPT)
+print("Model loaded from:", CKPT)
 
 def predict(p_phys, z, t):
-    """T (t, z) en C pour un scenario de la boite."""
+    """T (t, z) in C for a scenario of the box."""
     ZZ, TT = np.meshgrid(z / L, np.asarray(t) / T_WINDOW)
     zz = torch.tensor(ZZ.ravel()[:, None], dtype=DTYPE, device=DEV)
     tt = torch.tensor(TT.ravel()[:, None], dtype=DTYPE, device=DEV)
@@ -143,9 +143,9 @@ def predict(p_phys, z, t):
                         for i in range(0, len(zz), 20000)])
     return (T_AMB + DT_REF * th.cpu().numpy().reshape(ZZ.shape)) - 273.15
 
-# ================================================================ refroidissement pur
+# ================================================================ pure cooling
 def robin_mu0(bi):
-    """Plus petite racine de mu tan(mu/2) = Bi (mode propre de Robin symetrique)."""
+    """Smallest root of mu tan(mu/2) = Bi (symmetric Robin eigenmode)."""
     lo, hi = 1e-6, np.pi - 1e-6
     for _ in range(80):
         mid = 0.5 * (lo + hi)
@@ -156,16 +156,16 @@ def robin_mu0(bi):
     return 0.5 * (lo + hi)
 
 def cool(T0_C, dur_s, h_lat, h_end, n_pts=80):
-    """Segment sans freinage : decroissance du mode propre le plus lent."""
+    """Segment without braking: decay of the slowest eigenmode."""
     mu0 = robin_mu0(h_end * L / K0)
     lam = ALPHA_D * mu0**2 / L**2 + h_lat * PERIM / A_SEC / (RHO * CP0)
     t = np.linspace(0, dur_s, n_pts)
     return t, (T_AMB - 273.15) + (T0_C - (T_AMB - 273.15)) * np.exp(-lam * t)
 
 def taxi(T0_C, dur_s, dT_K, h_lat, h_end, n_pts=60):
-    """Phase de taxi : les freinages intermittents deposent dT_K au total,
-    repartis uniformement sur la duree (puissance moyenne dT/dur), en
-    competition avec le refroidissement. Forme close du 1er ordre :
+    """Taxi phase: the intermittent braking deposits dT_K in total,
+    spread uniformly over the duration (mean power dT/dur), in
+    competition with cooling. First-order closed form:
     T = T_amb + (T0 - T_amb) e^{-lam t} + (dT/dur) (1 - e^{-lam t}) / lam."""
     mu0 = robin_mu0(h_end * L / K0)
     lam = ALPHA_D * mu0**2 / L**2 + h_lat * PERIM / A_SEC / (RHO * CP0)
@@ -174,111 +174,111 @@ def taxi(T0_C, dur_s, dT_K, h_lat, h_end, n_pts=60):
     return t, (amb + (T0_C - amb) * np.exp(-lam * t)
                + dT_K / dur_s * (1 - np.exp(-lam * t)) / lam)
 
-# ================================================================ journee
-Z_S = np.array([4.5 * E_DISC])                 # capteur au centre
-Z_FULL = np.linspace(0.5, L / 0.0005 - 0.5, 200) * 0.0005   # pour la moyenne de fin de segment
+# ================================================================ day
+Z_S = np.array([4.5 * E_DISC])                 # sensor at the center
+Z_FULL = np.linspace(0.5, L / 0.0005 - 0.5, 200) * 0.0005   # for the end-of-segment mean
 Z_FULL = np.linspace(0, L, 200)
-H_SOL, H_VOL, H_END = 15.0, 35.0, 20.0         # h_vol : convection forcee train sorti / baie (equivalent)
-E_TAXI_MJ = 1.5                                # energie de freinage par frein et par phase de taxi
-T_BRAKE_SEG = 5 * 60.0                         # roulement d'atterrissage + degagement piste (PINN)
-T_TAXI_IN = 5 * 60.0                           # taxi-in : rechauffement progressif (freinages intermittents)
-T_TAXI_OUT = 10 * 60.0                         # taxi-out : idem, avant decollage
-T_GATE = 20 * 60.0                             # escale courte : rotation serree
-T_VOL_DEFAUT = 75 * 60.0                       # duree de vol par defaut si non precisee
-LIMITE_DECOLLAGE_C = 150.0                     # limite A320 freins avant decollage
+H_GROUND, H_FLIGHT, H_END = 15.0, 35.0, 20.0   # h_flight: forced convection, gear down / bay (equivalent)
+E_TAXI_MJ = 1.5                                # braking energy per brake and per taxi phase
+T_BRAKE_SEG = 5 * 60.0                         # landing roll + runway exit (PINN)
+T_TAXI_IN = 5 * 60.0                           # taxi-in: progressive heating (intermittent braking)
+T_TAXI_OUT = 10 * 60.0                         # taxi-out: same, before takeoff
+T_GATE = 20 * 60.0                             # short turnaround: tight rotation
+T_FLIGHT_DEFAULT = 75 * 60.0                   # default flight duration if not specified
+TAKEOFF_LIMIT_C = 150.0                        # A320 brake temperature limit before takeoff
 
-# Deux scenarios traces l'un sous l'autre :
-#  A. journee REALISTE : energies d'atterrissage variees d'un vol a l'autre.
-#     L'accumulation thermique existe mais est masquee par la variabilite des
-#     pics (+/- 100 K de pic contre ~70 K d'accumulation).
-#  B. rotations IDENTIQUES : experience controlee qui isole l'histoire
-#     thermique ; toute difference entre rotations vient du vol precedent, et
-#     la convergence geometrique vers le cycle limite devient lisible.
-# Chaque rotation precise sa duree de vol (>= 1 h, variee pour la journee
-# realiste ; fixe pour le scenario controle, ou tout doit etre identique).
+# Two scenarios plotted one above the other:
+#  A. REALISTIC day: landing energies vary from one flight to the next.
+#     Thermal accumulation exists but is hidden by the variability of the
+#     peaks (+/- 100 K of peak against ~70 K of accumulation).
+#  B. IDENTICAL rotations: controlled experiment that isolates the thermal
+#     history; any difference between rotations comes from the previous flight, and
+#     the geometric convergence towards the limit cycle becomes readable.
+# Each rotation specifies its flight duration (>= 1 h, varied for the realistic
+# day; fixed for the controlled scenario, where everything must be identical).
 SCENARIOS = [
-    ("A. journee realiste : energies et durees de vol variees",
+    ("A. realistic day: varied energies and flight durations",
      [dict(E=12.0, tb=40.0, vol=75), dict(E=14.5, tb=35.0, vol=95),
       dict(E=11.0, tb=45.0, vol=60), dict(E=16.0, tb=30.0, vol=120),
       dict(E=10.5, tb=42.0, vol=65), dict(E=13.0, tb=38.0, vol=90)]),
-    ("B. rotations identiques (E = 13,5 MJ, vol 75 min) : accumulation isolee",
+    ("B. identical rotations (E = 13.5 MJ, 75 min flight): isolated accumulation",
      [dict(E=13.5, tb=40.0, vol=75)] * 6),
 ]
 
 dT_taxi = E_TAXI_MJ * 1e6 / (M_STACK * CP0)
-print(f"Increment adiabatique par phase de taxi : +{dT_taxi:.1f} K")
+print(f"Adiabatic increment per taxi phase: +{dT_taxi:.1f} K")
 
 def simulate_day(rotations):
-    """Enchaine les rotations ; retourne trace, marques et lignes de tableau."""
+    """Chains the rotations; returns the trace, markers and table rows."""
     t_all, T_all, marks, rows = [], [], [], []
     T_cur, t0 = 20.0, 0.0
     for k, rot in enumerate(rotations):
-        # 1. taxi-out : rechauffement progressif par freinages intermittents
-        t_seg, T_seg = taxi(T_cur, T_TAXI_OUT, dT_taxi, H_SOL, H_END)
+        # 1. taxi-out: progressive heating by intermittent braking
+        t_seg, T_seg = taxi(T_cur, T_TAXI_OUT, dT_taxi, H_GROUND, H_END)
         t_all.append(t0 + t_seg); T_all.append(T_seg)
         T_cur = T_seg[-1]
         t0 += T_TAXI_OUT
-        T_deco = T_cur
-        marks.append(('decollage', t0))
+        T_takeoff = T_cur
+        marks.append(('takeoff', t0))
 
-        # 2. vol (duree propre a la rotation, en minutes)
-        dur_vol = rot.get('vol', T_VOL_DEFAUT / 60) * 60.0
-        t_seg, T_seg = cool(T_cur, dur_vol, H_VOL, H_END)
+        # 2. flight (duration specific to the rotation, in minutes)
+        dur_vol = rot.get('vol', T_FLIGHT_DEFAULT / 60) * 60.0
+        t_seg, T_seg = cool(T_cur, dur_vol, H_FLIGHT, H_END)
         t_all.append(t0 + t_seg); T_all.append(T_seg)
         T_cur = T_seg[-1]
         t0 += dur_vol
 
-        # 3. atterrissage + degagement : PINN
-        T_avant = T_cur
-        p = [rot['E'], rot['tb'], T_cur, H_SOL, H_END]
+        # 3. landing + runway exit: PINN
+        T_before = T_cur
+        p = [rot['E'], rot['tb'], T_cur, H_GROUND, H_END]
         t_seg = np.linspace(0, T_BRAKE_SEG, 300)
         T_sens = predict(p, Z_S, t_seg)[:, 0]
         t_all.append(t0 + t_seg); T_all.append(T_sens)
-        marks.append(('atterrissage', t0, T_avant))
+        marks.append(('landing', t0, T_before))
         pic = T_sens.max()
         T_cur = predict(p, Z_FULL, [T_BRAKE_SEG])[0].mean()
         t0 += T_BRAKE_SEG
 
-        # 4. taxi-in : rechauffement residuel en plein refroidissement
-        t_seg, T_seg = taxi(T_cur, T_TAXI_IN, dT_taxi, H_SOL, H_END)
+        # 4. taxi-in: residual heating while cooling
+        t_seg, T_seg = taxi(T_cur, T_TAXI_IN, dT_taxi, H_GROUND, H_END)
         t_all.append(t0 + t_seg); T_all.append(T_seg)
         T_cur = T_seg[-1]
         t0 += T_TAXI_IN
 
-        # 5. escale a la porte
-        t_seg, T_seg = cool(T_cur, T_GATE, H_SOL, H_END)
+        # 5. turnaround at the gate
+        t_seg, T_seg = cool(T_cur, T_GATE, H_GROUND, H_END)
         t_all.append(t0 + t_seg); T_all.append(T_seg)
         T_cur = T_seg[-1]
         t0 += T_GATE
-        rows.append((k + 1, rot['E'], rot.get('vol', T_VOL_DEFAUT / 60), T_deco, T_avant, pic, T_cur))
+        rows.append((k + 1, rot['E'], rot.get('vol', T_FLIGHT_DEFAULT / 60), T_takeoff, T_before, pic, T_cur))
     return np.concatenate(t_all), np.concatenate(T_all), marks, rows
 
 days = []
-for titre, rotations in SCENARIOS:
+for title_, rotations in SCENARIOS:
     t_all, T_all, marks, rows = simulate_day(rotations)
-    days.append((titre, t_all, T_all, marks))
-    print(f"\n{titre}")
-    print(f"{'rot':>3s} {'E [MJ]':>7s} {'vol [min]':>9s} {'T decollage':>12s} {'T avant atterr.':>16s} {'pic':>8s} {'T fin escale':>13s}")
-    for k, E, vol, T_deco, T_avant, pic, T_fin in rows:
-        avert = "  <-- DEPASSE LA LIMITE" if T_deco > LIMITE_DECOLLAGE_C else ""
-        print(f"{k:3d} {E:7.1f} {vol:9.0f} {T_deco:10.1f} C {T_avant:14.1f} C {pic:6.0f} C {T_fin:11.1f} C{avert}")
+    days.append((title_, t_all, T_all, marks))
+    print(f"\n{title_}")
+    print(f"{'rot':>3s} {'E [MJ]':>7s} {'flight [min]':>12s} {'T takeoff':>10s} {'T before landing':>17s} {'peak':>8s} {'T end of turn.':>15s}")
+    for k, E, vol, T_takeoff, T_before, pic, T_fin in rows:
+        warn = "  <-- ABOVE THE LIMIT" if T_takeoff > TAKEOFF_LIMIT_C else ""
+        print(f"{k:3d} {E:7.1f} {vol:9.0f} {T_takeoff:10.1f} C {T_before:14.1f} C {pic:6.0f} C {T_fin:11.1f} C{warn}")
 
 # ================================================================ figure
 fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
-for ax, (titre, t_all, T_all, marks) in zip(axes, days):
+for ax, (title_, t_all, T_all, marks) in zip(axes, days):
     ax.plot(t_all / 3600, T_all, lw=1.5)
-    ax.axhline(LIMITE_DECOLLAGE_C, color='r', ls='--', lw=1,
-               label=f'limite decollage {LIMITE_DECOLLAGE_C:.0f} C')
+    ax.axhline(TAKEOFF_LIMIT_C, color='r', ls='--', lw=1,
+               label=f'takeoff limit {TAKEOFF_LIMIT_C:.0f} C')
     for m in marks:
         ax.axvline(m[1] / 3600, color='k', lw=0.4, alpha=0.4)
-        if m[0] == 'atterrissage':      # annoter la T heritee du vol precedent
+        if m[0] == 'landing':      # annotate the T inherited from the previous flight
             ax.annotate(f'{m[2]:.0f}', (m[1] / 3600, m[2]), textcoords='offset points',
                         xytext=(-4, -14), ha='right', fontsize=11, color='C3')
             ax.plot(m[1] / 3600, m[2], 'o', ms=4, color='C3')
-    ax.set(ylabel='T capteur (C)', title=titre)
+    ax.set(ylabel='sensor T (C)', title=title_)
 axes[0].legend(loc='upper left', fontsize=11)
-axes[1].set(xlabel='temps (h)')
-axes[1].text(0.99, 0.95, 'points rouges : T avant atterrissage (accumulation -> cycle limite)',
+axes[1].set(xlabel='time (h)')
+axes[1].text(0.99, 0.95, 'red dots: T before landing (accumulation -> limit cycle)',
              transform=axes[1].transAxes, ha='right', va='top', fontsize=11, color='C3')
 fig.tight_layout()
 plt.show()

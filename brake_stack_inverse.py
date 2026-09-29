@@ -1,23 +1,23 @@
 """
-PROBLEME INVERSE : identifier des parametres physiques a partir du capteur.
+INVERSE PROBLEM: identifying physical parameters from the sensor.
 
-Principe : le PINN parametrique (brake_stack_pinn_param.pt, GELE, aucun
-reentrainement) est une fonction differentiable T(z, t ; p). L'inversion est
-donc une simple descente de gradient SUR SES ENTREES p : on cherche le p qui
-reproduit au mieux la serie temporelle du capteur. Cout : quelques secondes.
+Principle: the parametric PINN (brake_stack_pinn_param.pt, FROZEN, no
+retraining) is a differentiable function T(z, t ; p). The inversion is
+therefore a simple gradient descent ON ITS INPUTS p: we look for the p that
+best reproduces the sensor time series. Cost: a few seconds.
 
-Protocole anti "crime inverse" : les mesures ne viennent PAS du PINN mais du
-solveur FD (fd_solve, copie de brake_stack_pinn_param.py), avec bruit 3 K et
-echantillonnage 30 s (cadence enregistreur de vol). Le modele d'inversion et
-le generateur de donnees sont donc deux codes independants.
+Protocol against the "inverse crime": measurements do NOT come from the PINN but from
+the FD solver (fd_solve, copied from brake_stack_pinn_param.py), with 3 K noise and
+30 s sampling (flight-data recorder rate). The inversion model and
+the data generator are therefore two independent codes.
 
-Inconnues : E_brake, h_lat, h_end   (tb et T_init supposes connus)
-Etude d'identifiabilite : la meme inversion est repetee avec des fenetres
-d'observation croissantes (5 min, 20 min, 2 h) et 8 departs aleatoires
-chacune : la dispersion des solutions dit ce que le capteur contraint ou non.
-Attendu physiquement : E des le pic ; h_lat avec la pente de la queue ;
-h_end mal contraint (correle a h_lat, son effet passe par les extremites
-que le capteur central ne voit presque pas).
+Unknowns: E_brake, h_lat, h_end   (tb and T_init assumed known)
+Identifiability study: the same inversion is repeated with increasing
+observation windows (5 min, 20 min, 2 h) and 8 random starts
+each: the spread of the solutions tells what the sensor constrains or not.
+Physically expected: E from the peak; h_lat with the slope of the tail;
+h_end poorly constrained (correlated with h_lat, its effect acts through the ends
+that the central sensor barely sees).
 """
 
 import os
@@ -29,9 +29,9 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-# Tailles de police dimensionnees pour l'insertion dans le rapport : LaTeX
-# ramene la figure a ~6.1 pouces de large, donc la police effective vaut
-# fontsize x 6.1 / figsize_largeur. Objectif ~8.5 pt une fois imprime.
+# Font sizes chosen for the report: LaTeX scales the figure to ~6.1 inches
+# wide, so the effective font size is
+# fontsize x 6.1 / figsize_width. Target ~8.5 pt once printed.
 plt.rcParams.update({'font.size': 18, 'axes.titlesize': 18, 'axes.labelsize': 18,
                      'xtick.labelsize': 16, 'ytick.labelsize': 16,
                      'legend.fontsize': 13, 'lines.linewidth': 1.8})
@@ -42,7 +42,7 @@ DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE = torch.float32
 
 # ================================================================ definitions
-# IDENTIQUES a brake_stack_pinn_param.py (necessaires pour recharger le .pt)
+# IDENTICAL to brake_stack_pinn_param.py (required to reload the .pt)
 N_DISC, E_DISC = 9, 0.025
 L = N_DISC * E_DISC
 R_EXT, R_INT = 0.20, 0.12
@@ -128,17 +128,17 @@ try:
     drive.mount('/content/drive')
     CKPT = '/content/drive/MyDrive/brake_stack_pinn_param.pt'
 except Exception as e:
-    print("Drive non monte (", e, ") : recherche du .pt en local")
+    print("Drive not mounted (", e, "): looking for the .pt locally")
 if not os.path.exists(CKPT):
-    CKPT = 'brake_stack_pinn_param.pt'   # repli : fichier televerse dans la session
+    CKPT = 'brake_stack_pinn_param.pt'   # fallback: file uploaded to the session
 model = ParamPINN().to(DEV)
 model.load_state_dict(torch.load(CKPT, map_location=DEV))
 model.eval()
 for w in model.parameters():
-    w.requires_grad_(False)                    # le modele est GELE : on n'optimise que p
-print("Modele charge depuis :", CKPT)
+    w.requires_grad_(False)                    # the model is FROZEN: only p is optimized
+print("Model loaded from:", CKPT)
 
-# ================================================================ verite terrain FD
+# ================================================================ FD ground truth
 def fd_solve(p_phys, nz=450):
     E, tb, T_init_C, h_lat, h_end = p_phys
     E *= 1e6
@@ -173,18 +173,18 @@ def fd_solve(p_phys, nz=450):
         out[n] = T
     return z, t, out - 273.15
 
-P_TRUE = [12.0, 40.0, 20.0, 15.0, 20.0]        # verite terrain
-TB_KNOWN, T0_KNOWN = P_TRUE[1], P_TRUE[2]      # supposes connus a l'inversion
+P_TRUE = [12.0, 40.0, 20.0, 15.0, 20.0]        # ground truth
+TB_KNOWN, T0_KNOWN = P_TRUE[1], P_TRUE[2]      # assumed known for the inversion
 NOISE_C, DT_SENSOR = 3.0, 30.0
 
-print("Generation de la verite terrain (FD)...")
+print("Generating the ground truth (FD)...")
 z_fd, t_fd, T_fd = fd_solve(P_TRUE)
 t_s = np.arange(DT_SENSOR, T_WINDOW + 1e-9, DT_SENSOR)
 
 def make_data(source, z_s, seed=42):
-    """Serie capteur bruitee. source='fd' : mesures independantes du modele
-    d'inversion. source='pinn' : crime inverse ASSUME, sert de controle pour
-    attribuer le biais des fenetres longues a l'erreur du modele direct."""
+    """Noisy sensor series. source='fd': measurements independent of the inversion
+    model. source='pinn': DELIBERATE inverse crime, used as a control to
+    attribute the bias of long windows to the error of the direct model."""
     rng = np.random.default_rng(seed)
     if source == 'fd':
         i_z = np.argmin(np.abs(z_fd - z_s))
@@ -198,11 +198,11 @@ def make_data(source, z_s, seed=42):
     return T_clean + rng.normal(0, NOISE_C, len(t_s))
 
 # ================================================================ inversion
-FREE = [0, 3, 4]                               # indices des inconnues : E, h_lat, h_end
+FREE = [0, 3, 4]                               # indices of the unknowns: E, h_lat, h_end
 
 def invert(z_s, t_data, T_data, seed, n_iter=400):
-    """Descente Adam sur u (parametres libres en logit, bornes de la boite
-    imposees par sigmoide). Retourne p estime."""
+    """Adam descent on u (free parameters in logit space, box bounds
+    enforced by a sigmoid). Returns the estimated p."""
     g = torch.Generator(device='cpu').manual_seed(seed)
     u = torch.randn(len(FREE), generator=g).to(DEV).requires_grad_(True)
     zz = torch.full((len(t_data), 1), z_s / L, dtype=DTYPE, device=DEV)
@@ -222,12 +222,12 @@ def invert(z_s, t_data, T_data, seed, n_iter=400):
 
 WINDOWS_MIN = [5, 20, 120]
 N_START = 8
-Z_CENTRE, Z_BORD = 4.5 * E_DISC, 0.5 * E_DISC
+Z_CENTER, Z_EDGE = 4.5 * E_DISC, 0.5 * E_DISC
 
-# Trois experiences : reference, controle du crime inverse, capteur deplace
-EXPS = [('reference : FD, capteur centre', 'fd', Z_CENTRE),
-        ('controle crime inverse : donnees PINN, capteur centre', 'pinn', Z_CENTRE),
-        ('capteur en BORD de pile : FD, z = 0.5 e_disc', 'fd', Z_BORD)]
+# Three experiments: reference, inverse-crime control, moved sensor
+EXPS = [('reference: FD, central sensor', 'fd', Z_CENTER),
+        ('inverse-crime control: PINN data, central sensor', 'pinn', Z_CENTER),
+        ('sensor at the stack END: FD, z = 0.5 e_disc', 'fd', Z_EDGE)]
 
 all_results = {}
 t0_ = time.time()
@@ -240,20 +240,20 @@ for label, source, z_s in EXPS:
         sols = np.array([invert(z_s, t_s[m], T_data[m], seed) for seed in range(N_START)])
         res[w] = sols
         med, lo, hi = np.median(sols, 0), sols.min(0), sols.max(0)
-        print(f"  fenetre {w:3d} min ({time.time() - t0_:.0f} s) :")
+        print(f"  window {w:3d} min ({time.time() - t0_:.0f} s):")
         for j, idx in enumerate(FREE):
-            print(f"    {P_NAMES[idx]:>10s} : vrai {P_TRUE[idx]:6.1f}   estime {med[j]:6.1f}"
+            print(f"    {P_NAMES[idx]:>10s}: true {P_TRUE[idx]:6.1f}   estimated {med[j]:6.1f}"
                   f"   [min {lo[j]:6.1f}, max {hi[j]:6.1f}]")
     all_results[label] = res
-results = all_results[EXPS[0][0]]              # la reference alimente les diagnostics ci-dessous
-T_s = make_data('fd', Z_CENTRE)
-Z_S = Z_CENTRE
+results = all_results[EXPS[0][0]]              # the reference feeds the diagnostics below
+T_s = make_data('fd', Z_CENTER)
+Z_S = Z_CENTER
 
-# Le couple (h_lat, h_end) est correle : le capteur central contraint le taux
-# de refroidissement GLOBAL, pas sa repartition entre flanc et extremites. On
-# le verifie en calculant, pour chaque solution, le taux du mode propre le
-# plus lent lambda(h_lat, h_end) : il doit etre bien mieux ressere que les
-# deux h pris separement.
+# The pair (h_lat, h_end) is correlated: the central sensor constrains the GLOBAL
+# cooling rate, not its split between the flank and the ends. We
+# check it by computing, for each solution, the rate of the slowest
+# eigenmode lambda(h_lat, h_end): it must be much tighter than the
+# two h taken separately.
 def robin_mu0(bi):
     lo, hi = 1e-6, np.pi - 1e-6
     for _ in range(80):
@@ -267,10 +267,10 @@ def lam_of(h_lat, h_end):
 
 lam_true = lam_of(P_TRUE[3], P_TRUE[4])
 lams = np.array([lam_of(hl, he) for _, hl, he in results[120]])
-print(f"\nTaux de refroidissement global lambda (fenetre 2 h) :")
-print(f"  vrai {lam_true * 1e4:.3f} e-4/s   estime {np.median(lams) * 1e4:.3f}"
+print(f"\nGlobal cooling rate lambda (2 h window):")
+print(f"  true {lam_true * 1e4:.3f} e-4/s   estimated {np.median(lams) * 1e4:.3f}"
       f"   [min {lams.min() * 1e4:.3f}, max {lams.max() * 1e4:.3f}] "
-      f"-> la COMBINAISON est identifiee, pas la repartition")
+      f"-> the COMBINATION is identified, not the split")
 
 # ================================================================ figures
 fig, ax = plt.subplots(1, 3, figsize=(15, 4.5))
@@ -281,20 +281,20 @@ tt = torch.tensor(t_s / T_WINDOW, dtype=DTYPE, device=DEV)[:, None]
 pp = torch.tensor(p_best, dtype=DTYPE, device=DEV).expand(len(t_s), 5)
 with torch.no_grad():
     T_fit = (T_AMB + DT_REF * model(zz, tt, pp).cpu().numpy()[:, 0]) - 273.15
-ax[0].plot(t_s / 60, T_s, '.', ms=3, alpha=0.5, label='capteur bruite (FD)')
-ax[0].plot(t_s / 60, T_fit, 'r', lw=1.5, label='PINN au p identifie')
-ax[0].set(xlabel='t (min)', ylabel='T (C)', title='Ajustement (fenetre 2 h)')
+ax[0].plot(t_s / 60, T_s, '.', ms=3, alpha=0.5, label='noisy sensor (FD)')
+ax[0].plot(t_s / 60, T_fit, 'r', lw=1.5, label='PINN at the identified p')
+ax[0].set(xlabel='t (min)', ylabel='T (C)', title='Fit (2 h window)')
 ax[0].legend()
 
-# panneau 2 : E a 120 min pour les trois experiences (biais de modele)
-# panneau 3 : h_end a 120 min pour les trois experiences (placement du capteur)
-labels_courts = ['reference\n(FD, centre)', 'crime inverse\n(PINN, centre)', 'capteur bord\n(FD, z=e/2)']
-for a, j, idx, ttl in [(ax[1], 0, 0, 'E identifie, fenetre 2 h (tirets = vrai)'),
-                       (ax[2], 2, 4, 'h_end identifie, fenetre 2 h (tirets = vrai)')]:
+# panel 2: E at 120 min for the three experiments (model bias)
+# panel 3: h_end at 120 min for the three experiments (sensor placement)
+short_labels = ['reference\n(FD, center)', 'inverse crime\n(PINN, center)', 'end sensor\n(FD, z=e/2)']
+for a, j, idx, ttl in [(ax[1], 0, 0, 'Identified E, 2 h window (dashed = true)'),
+                       (ax[2], 2, 4, 'Identified h_end, 2 h window (dashed = true)')]:
     for e, (label, _, _) in enumerate(EXPS):
         y = all_results[label][120][:, j]
         a.plot(np.full_like(y, e), y, 'o', ms=5, alpha=0.6, color=f'C{e}')
     a.axhline(P_TRUE[idx], color='k', ls='--', lw=1)
-    a.set(xticks=range(3), xticklabels=labels_courts, title=ttl)
+    a.set(xticks=range(3), xticklabels=short_labels, title=ttl)
 fig.tight_layout()
 plt.show()

@@ -1,24 +1,24 @@
 """
-PINN PARAMETRIQUE 1D : un reseau pour une famille de scenarios de freinage.
+1D PARAMETRIC PINN: one network for a family of braking scenarios.
 
-Entrees du reseau : (z^, tau, p) avec p = 5 parametres de scenario :
-    E_brake  [MJ]    energie dissipee par frein          4 .. 25
-    t_brake  [s]     duree du roulement freine           20 .. 60
-    T_init   [C]     temperature initiale uniforme       20 .. 300  (vols successifs)
-    h_lat    [W/m2K] convection laterale                 5 .. 40    (ventilateurs)
-    h_end    [W/m2K] convection aux extremites           5 .. 40
-Les points de collocation sont tires dans (z, t, p) : le reseau apprend la
-solution pour TOUT p de la boite en un seul entrainement, sans aucune donnee.
-Ensuite predict(p, z, t) donne T(z, t) en quelques microsecondes par point.
+Network inputs: (z^, tau, p) with p = 5 scenario parameters:
+    E_brake  [MJ]    energy dissipated per brake         4 .. 25
+    t_brake  [s]     braked roll duration                20 .. 60
+    T_init   [C]     uniform initial temperature         20 .. 300  (successive flights)
+    h_lat    [W/m2K] lateral convection                  5 .. 40    (brake fans)
+    h_end    [W/m2K] convection at the ends              5 .. 40
+Collocation points are drawn in (z, t, p): the network learns the
+solution for EVERY p of the box in a single training run, without any data.
+Then predict(p, z, t) gives T(z, t) in a few microseconds per point.
 
-Structure identique a brake_stack_pinn_v3.py : theta = theta_p + rampe * N,
-theta_p = serie de cosinus (exacte sauf convection aux extremites), qui depend
-analytiquement de E, t_brake, T_init, h_lat ; le reseau porte l'effet de h_end.
+Same structure as brake_stack_pinn_v3.py: theta = theta_p + ramp * N,
+theta_p = cosine series (exact except for the convection at the ends), which depends
+analytically on E, t_brake, T_init, h_lat; the network carries the effect of h_end.
 
-Validation : le script contient le solveur FD 1D (fonction fd_solve) et
-compare le PINN a des scenarios tires au hasard, jamais vus a l'entrainement
-(ils ne peuvent pas l'etre : l'entrainement ne voit pas de scenarios, il voit
-des points).
+Validation: the script contains the 1D FD solver (function fd_solve) and
+compares the PINN with randomly drawn scenarios, never seen during training
+(they cannot be: training does not see scenarios, it sees
+points).
 """
 
 import os
@@ -30,9 +30,9 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-# Tailles de police dimensionnees pour l'insertion dans le rapport : LaTeX
-# ramene la figure a ~6.1 pouces de large, donc la police effective vaut
-# fontsize x 6.1 / figsize_largeur. Objectif ~8.5 pt une fois imprime.
+# Font sizes chosen for the report: LaTeX scales the figure to ~6.1 inches
+# wide, so the effective font size is
+# fontsize x 6.1 / figsize_width. Target ~8.5 pt once printed.
 plt.rcParams.update({'font.size': 20, 'axes.titlesize': 20, 'axes.labelsize': 20,
                      'xtick.labelsize': 18, 'ytick.labelsize': 18,
                      'legend.fontsize': 15, 'lines.linewidth': 1.8})
@@ -41,24 +41,24 @@ torch.manual_seed(0)
 np.random.seed(0)
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE = torch.float32
-print("Device :", DEV)
+print("Device:", DEV)
 
-# ---------------------------------------------------------------- sauvegarde Drive
-# Sur Google Colab, /content est efface a la fin de la session : on monte le
-# Drive et on sauvegarde dessus (checkpoint apres Adam + modele final).
-# Hors Colab, le script retombe sur le dossier courant.
+# ---------------------------------------------------------------- Drive backup
+# On Google Colab, /content is wiped at the end of the session: we mount
+# Drive and save there (checkpoint after Adam + final model).
+# Outside Colab, the script falls back to the current folder.
 SAVE_DIR = '.'
 try:
     from google.colab import drive
     drive.mount('/content/drive')
     SAVE_DIR = '/content/drive/MyDrive'
 except Exception as e:
-    print("Drive non monte (", e, ") : sauvegarde dans le dossier courant,")
-    print("pensez a copier le .pt ailleurs avant la fin de la session Colab.")
+    print("Drive not mounted (", e, "): saving to the current folder,")
+    print("remember to copy the .pt elsewhere before the Colab session ends.")
 CKPT = os.path.join(SAVE_DIR, 'brake_stack_pinn_param.pt')
-print("Le modele sera sauvegarde dans :", CKPT)
+print("The model will be saved to:", CKPT)
 
-# ---------------------------------------------------------------- constantes fixes
+# ---------------------------------------------------------------- fixed constants
 N_DISC, E_DISC = 9, 0.025
 L = N_DISC * E_DISC
 R_EXT, R_INT = 0.20, 0.12
@@ -71,27 +71,27 @@ N_INTERFACE = N_DISC - 1
 Z_INT = np.arange(1, N_DISC) * E_DISC
 T_WINDOW = 7200.0
 
-# ---------------------------------------------------------------- boite de scenarios
+# ---------------------------------------------------------------- scenario box
 P_NAMES = ['E_brake_MJ', 't_brake_s', 'T_init_C', 'h_lat', 'h_end']
 P_LO = np.array([4.0, 20.0, 20.0, 5.0, 5.0])
 P_HI = np.array([25.0, 60.0, 300.0, 40.0, 40.0])
 
-# ---------------------------------------------------------------- adimensionnement (echelles FIXES)
+# ---------------------------------------------------------------- nondimensionalization (FIXED scales)
 ALPHA = K0 / (RHO * CP0)
-DT_REF = P_HI[0] * 1e6 / (RHO * A_SEC * L * CP0)     # elevation adiabatique du cas le plus energetique
+DT_REF = P_HI[0] * 1e6 / (RHO * A_SEC * L * CP0)     # adiabatic temperature rise of the most energetic case
 FO = ALPHA * T_WINDOW / L**2
 SIG_HAT = SIGMA_Q / L
 ZI_HAT = torch.tensor(Z_INT / L, dtype=DTYPE, device=DEV)
-print(f"FO = {FO:.3f}   dT_ref = {DT_REF:.0f} K   fenetre {T_WINDOW:.0f} s")
+print(f"FO = {FO:.3f}   dT_ref = {DT_REF:.0f} K   window {T_WINDOW:.0f} s")
 
 def unpack(p):
-    """p : (N, 5) tenseur physique -> grandeurs adimensionnees, chacune (N, 1)."""
+    """p: (N, 5) physical tensor -> nondimensional quantities, each (N, 1)."""
     E = p[:, 0:1] * 1e6
     tb = p[:, 1:2] / T_WINDOW
     theta0 = (p[:, 2:3] + 273.15 - T_AMB) / DT_REF
     s_hat = p[:, 3:4] * PERIM / A_SEC * T_WINDOW / (RHO * CP0)
     bi = p[:, 4:5] * L / K0
-    q0 = (T_WINDOW / (RHO * CP0 * DT_REF)) * 2 * E / p[:, 1:2] / (L * A_SEC)   # amplitude de q0 a t = 0
+    q0 = (T_WINDOW / (RHO * CP0 * DT_REF)) * 2 * E / p[:, 1:2] / (L * A_SEC)   # amplitude of q0 at t = 0
     return tb, theta0, s_hat, bi, q0
 
 def power_hat(th, tb, q0):
@@ -102,10 +102,10 @@ def source_hat(zh, th, tb, q0):
     g = g / (SIG_HAT * np.sqrt(2 * np.pi)) / N_INTERFACE
     return power_hat(th, tb, q0) * g
 
-# ---------------------------------------------------------------- theta_p : serie de cosinus parametrique
+# ---------------------------------------------------------------- theta_p: parametric cosine series
 N_MODES = 240
 n_ = torch.arange(N_MODES, dtype=DTYPE, device=DEV)
-LAM_DIFF = (n_ * np.pi)**2 * FO                                           # (K,) ; + s_hat par scenario
+LAM_DIFF = (n_ * np.pi)**2 * FO                                           # (K,); + s_hat per scenario
 G_N = (torch.cos(np.pi * n_[None, :] * ZI_HAT[:, None]).mean(dim=0)
        * torch.exp(-0.5 * (np.pi * n_ * SIG_HAT)**2))
 G_N = torch.where(n_ == 0, torch.ones_like(G_N), 2 * G_N)
@@ -119,9 +119,9 @@ def theta_particular(zh, th, tb, theta0, s_hat, q0):
     I2 = u * E_u / lam - I1 / lam
     A = q0 * (I1 - I2 / tb)
     series = (A * G_N[None, :] * torch.cos(np.pi * n_[None, :] * zh)).sum(dim=1, keepdim=True)
-    return theta0 * torch.exp(-s_hat * th) + series      # CI uniforme : mode 0 seul, decroissance exp(-S^ t^)
+    return theta0 * torch.exp(-s_hat * th) + series      # uniform IC: mode 0 only, decay exp(-S^ t^)
 
-# ---------------------------------------------------------------- log-temps
+# ---------------------------------------------------------------- log-time
 TAU_0 = 0.001
 TAU_MAX = float(np.log1p(1.0 / TAU_0))
 def tau_of(th):
@@ -129,7 +129,7 @@ def tau_of(th):
 def t_of_tau(tau):
     return TAU_0 * torch.expm1(tau * TAU_MAX)
 
-# ---------------------------------------------------------------- reseau
+# ---------------------------------------------------------------- network
 RAMP_HAT = 0.01
 N_FF, FF_SCALE = 32, (3.0, 2.0)
 WIDTH, DEPTH = 96, 5
@@ -164,7 +164,7 @@ def derivs(model, zh, th, p):
     theta_zz = torch.autograd.grad(theta_z, zh, torch.ones_like(theta_z), create_graph=True)[0]
     return theta, theta_z, theta_t, theta_zz
 
-# ---------------------------------------------------------------- echantillonnage dans (z, t, p)
+# ---------------------------------------------------------------- sampling in (z, t, p)
 N_PDE, N_BC, RESAMPLE_EVERY = 6000, 600, 200
 W_PDE, W_BC = 1.0, 100.0
 
@@ -200,7 +200,7 @@ def losses(model, zh, th, p, th_bc, p_bc):
     l_bc = ((thz0 - bi * th0)**2).mean() + ((thz1 + bi * th1)**2).mean()
     return l_pde, l_bc
 
-# ---------------------------------------------------------------- entrainement
+# ---------------------------------------------------------------- training
 model = ParamPINN().to(DEV)
 N_ADAM, N_LBFGS = 1000, 4000
 hist = []
@@ -219,8 +219,8 @@ for it in range(N_ADAM):
     if it % 100 == 0:
         print(f"Adam {it:5d}  pde {l_pde.item():.2e}  bc {l_bc.item():.2e}  ({time.time() - t0_:.0f} s)")
 
-torch.save(model.state_dict(), CKPT)          # checkpoint : Adam termine
-print("Checkpoint (fin d'Adam) sauvegarde.")
+torch.save(model.state_dict(), CKPT)          # checkpoint: Adam done
+print("Checkpoint (end of Adam) saved.")
 
 zh, th, p = sample_pde(3 * N_PDE)
 th_bc, p_bc = sample_bc(3 * N_BC)
@@ -236,13 +236,13 @@ def closure():
     return loss
 
 opt.step(closure)
-print(f"L-BFGS termine : pde {hist[-1][0]:.2e}  bc {hist[-1][1]:.2e}  ({time.time() - t0_:.0f} s)")
+print(f"L-BFGS done: pde {hist[-1][0]:.2e}  bc {hist[-1][1]:.2e}  ({time.time() - t0_:.0f} s)")
 torch.save(model.state_dict(), CKPT)
-print("Modele final sauvegarde dans :", CKPT)
+print("Final model saved to:", CKPT)
 
-# ---------------------------------------------------------------- API de prediction
+# ---------------------------------------------------------------- prediction API
 def predict(p_phys, z, t):
-    """p_phys : 5 valeurs physiques ; z (m), t (s) : tableaux 1D -> T (t, z) en C."""
+    """p_phys: 5 physical values; z (m), t (s): 1D arrays -> T (t, z) in C."""
     ZZ, TT = np.meshgrid(z / L, t / T_WINDOW)
     zz = torch.tensor(ZZ.ravel()[:, None], dtype=DTYPE, device=DEV)
     tt = torch.tensor(TT.ravel()[:, None], dtype=DTYPE, device=DEV)
@@ -252,9 +252,9 @@ def predict(p_phys, z, t):
                         for i in range(0, len(zz), 20000)])
     return (T_AMB + DT_REF * th.cpu().numpy().reshape(ZZ.shape)) - 273.15
 
-# ---------------------------------------------------------------- solveur FD (validation)
+# ---------------------------------------------------------------- FD solver (validation)
 def fd_solve(p_phys, nz=450):
-    """Reference volumes finis / Crank-Nicolson pour un scenario. Retourne z (m), t (s), T (t, z) en C."""
+    """Finite-volume / Crank-Nicolson reference for one scenario. Returns z (m), t (s), T (t, z) in C."""
     E, tb, T_init_C, h_lat, h_end = p_phys
     E *= 1e6
     dz = L / nz
@@ -288,13 +288,13 @@ def fd_solve(p_phys, nz=450):
         out[n] = T
     return z, t, out - 273.15
 
-# ---------------------------------------------------------------- validation sur scenarios tires au hasard
+# ---------------------------------------------------------------- validation on randomly drawn scenarios
 rng = np.random.default_rng(1)
 N_TEST = 4
 tests = P_LO + (P_HI - P_LO) * rng.random((N_TEST, 5))
-tests[0] = [12.0, 40.0, 20.0, 15.0, 20.0]        # le scenario de reference des scripts precedents
-print("\nValidation contre le FD (scenarios non vus) :")
-print("  " + "  ".join(f"{n:>10s}" for n in P_NAMES) + "    RMSE 0-2h   max|err|   RMSE capteur   pic FD / PINN")
+tests[0] = [12.0, 40.0, 20.0, 15.0, 20.0]        # the reference scenario of the previous scripts
+print("\nValidation against FD (unseen scenarios):")
+print("  " + "  ".join(f"{n:>10s}" for n in P_NAMES) + "    RMSE 0-2h   max|err|   sensor RMSE   peak FD / PINN")
 results = []
 for p_test in tests:
     z, t, T_fd = fd_solve(p_test)
@@ -312,23 +312,23 @@ hist = np.array(hist)
 fig, ax = plt.subplots(2, 3, figsize=(16, 9))
 ax[0, 0].semilogy(hist[:, 0], label='EDP'); ax[0, 0].semilogy(hist[:, 1], label='CL')
 ax[0, 0].axvline(N_ADAM, color='k', lw=0.5)
-ax[0, 0].set(xlabel='iteration', ylabel='perte', title='Convergence'); ax[0, 0].legend()
+ax[0, 0].set(xlabel='iteration', ylabel='loss', title='Convergence'); ax[0, 0].legend()
 for k, (p_test, z, t, T_fd, T_pinn) in enumerate(results):
     a = ax.ravel()[k + 1]
     i_z = np.argmin(np.abs(z - 4.5 * E_DISC))
-    a.plot(t / 60, T_fd[:, i_z], label='FD capteur'); a.plot(t / 60, T_pinn[:, i_z], '--', label='PINN capteur')
-    a.plot(t / 60, T_fd[:, 0], label='FD bord'); a.plot(t / 60, T_pinn[:, 0], '--', label='PINN bord')
+    a.plot(t / 60, T_fd[:, i_z], label='FD sensor'); a.plot(t / 60, T_pinn[:, i_z], '--', label='PINN sensor')
+    a.plot(t / 60, T_fd[:, 0], label='FD end'); a.plot(t / 60, T_pinn[:, 0], '--', label='PINN end')
     a.set(xscale='log', xlim=(0.05, 120), xlabel='t (min)', ylabel='T (C)',
           title=f"E={p_test[0]:.0f} MJ, tb={p_test[1]:.0f} s, T0={p_test[2]:.0f} C, h_lat={p_test[3]:.0f}, h_end={p_test[4]:.0f}")
     a.legend(fontsize=15)
-# balayage : pic de temperature capteur en fonction de E, pour 3 T_init (PINN seul, instantane)
+# sweep: sensor peak temperature as a function of E, for 3 values of T_init (PINN only, instantaneous)
 a = ax[1, 2]
 E_grid = np.linspace(P_LO[0], P_HI[0], 30)
 z1 = np.array([4.5 * E_DISC]); t1 = np.linspace(0, 300, 301)
 for T0 in [20, 150, 300]:
     peaks = [predict([E, 40.0, T0, 15.0, 20.0], z1, t1).max() for E in E_grid]
     a.plot(E_grid, peaks, label=f'T_init = {T0} C')
-a.set(xlabel='E_brake (MJ)', ylabel='pic capteur (C)', title='Balayage PINN : pic vs energie (tb = 40 s)')
+a.set(xlabel='E_brake (MJ)', ylabel='sensor peak (C)', title='PINN sweep: peak vs energy (tb = 40 s)')
 a.legend(fontsize=15)
 fig.tight_layout()
 plt.show()

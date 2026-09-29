@@ -1,26 +1,26 @@
 """
-PINN 1D v3 : fenetre longue (0..2 h), freinage + courbe de refroidissement.
+1D PINN v3: long window (0..2 h), braking + cooling curve.
 
-Meme physique que brake_stack_pinn_v2.py (lit brake_stack_data.npz), mais :
+Same physics as brake_stack_pinn_v2.py (reads brake_stack_data.npz), but:
 
-1. theta_p n'est plus une quadrature de gaussiennes + images : c'est la serie
-   de cosinus exacte du probleme a flux nul aux extremites, avec puits lateral,
+1. theta_p is no longer a quadrature of Gaussians + images: it is the exact
+   cosine series of the zero-flux problem at the ends, with the lateral sink,
        theta_p(z^, t^) = sum_n g_n cos(n pi z^) A_n(t^)
-       A_n(t^) = int_0^{min(t^,TB)} q0(t') exp(-lambda_n (t^ - t')) dt'   (forme close)
+       A_n(t^) = int_0^{min(t^,TB)} q0(t') exp(-lambda_n (t^ - t')) dt'   (closed form)
        lambda_n = (n pi)^2 FO + S^
-   Chaque mode verifie l'EDP exactement (residu nul), pas de quadrature, cout
-   N_MODES cosinus par point. Les gaussiennes d'interface sont resolues avec
-   ~150 modes (facteur exp(-(n pi sigma^)^2 / 2)). Sur 2 h, les images auraient
-   demande 4 a 5 ordres de reflexion : la serie est plus simple et exacte.
+   Each mode satisfies the PDE exactly (zero residual), no quadrature, a cost of
+   N_MODES cosines per point. The interface Gaussians are resolved with
+   ~150 modes (factor exp(-(n pi sigma^)^2 / 2)). Over 2 h, images would have
+   required 4 to 5 reflection orders: the series is simpler and exact.
 
-2. Le reseau apprend UNIQUEMENT la convection aux extremites (Robin, Bi = 0.3),
-   absente de theta_p : ~1/3 du refroidissement total. C'est une correction
-   lisse en z, lente en t, negative. Ansatz :
+2. The network learns ONLY the convection at the ends (Robin, Bi = 0.3),
+   which is absent from theta_p: ~1/3 of the total cooling. It is a correction
+   that is smooth in z, slow in t and negative. Ansatz:
        theta = theta_p + (1 - exp(-t^ / TB)) * N(z^, tau)
-   avec tau = log-temps, car t^ doit couvrir 40 s (t^ = 0.0056) et 2 h (t^ = 1).
+   with tau = log-time, because t^ must cover 40 s (t^ = 0.0056) and 2 h (t^ = 1).
 
-3. Collocation echantillonnee uniformement en tau (log-temps), points
-   d'interface seulement pendant le freinage.
+3. Collocation sampled uniformly in tau (log-time), interface points
+   only during braking.
 """
 
 import time
@@ -29,9 +29,9 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-# Tailles de police dimensionnees pour l'insertion dans le rapport : LaTeX
-# ramene la figure a ~6.1 pouces de large, donc la police effective vaut
-# fontsize x 6.1 / figsize_largeur. Objectif ~8.5 pt une fois imprime.
+# Font sizes chosen for the report: LaTeX scales the figure to ~6.1 inches
+# wide, so the effective font size is
+# fontsize x 6.1 / figsize_width. Target ~8.5 pt once printed.
 plt.rcParams.update({'font.size': 15, 'axes.titlesize': 15, 'axes.labelsize': 15,
                      'xtick.labelsize': 13, 'ytick.labelsize': 13,
                      'legend.fontsize': 10, 'lines.linewidth': 1.8})
@@ -41,7 +41,7 @@ np.random.seed(0)
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE = torch.float32
 
-# ---------------------------------------------------------------- donnees FD
+# ---------------------------------------------------------------- FD data
 d = np.load('brake_stack_data.npz')
 L, RHO, K0, CP0 = float(d['L']), float(d['rho']), float(d['k0']), float(d['cp0'])
 H_END, S_LAT, T_AMB, T_INIT = (float(d['h_end']), float(d['s_lat']),
@@ -51,8 +51,8 @@ E_BRAKE, T_BRAKE, SIGMA_Q, A_SEC = (float(d['e_brake']), float(d['t_brake']),
 Z_INT = d['z_int']
 N_INTERFACE = len(Z_INT)
 
-# ---------------------------------------------------------------- adimensionnement
-T_WINDOW = float(d['t'][-1])                   # toute la duree simulee (7200 s)
+# ---------------------------------------------------------------- nondimensionalization
+T_WINDOW = float(d['t'][-1])                   # whole simulated duration (7200 s)
 ALPHA = K0 / (RHO * CP0)
 DT_REF = E_BRAKE / (RHO * A_SEC * L * CP0)
 FO = ALPHA * T_WINDOW / L**2
@@ -63,7 +63,7 @@ TB_HAT = T_BRAKE / T_WINDOW
 SIG_HAT = SIGMA_Q / L
 ZI_HAT = torch.tensor(Z_INT / L, dtype=DTYPE, device=DEV)
 THETA_0 = (T_INIT - T_AMB) / DT_REF
-Q0_MAX = Q_SCALE * 2 * E_BRAKE / T_BRAKE / (L * A_SEC)     # amplitude de q0 a t = 0
+Q0_MAX = Q_SCALE * 2 * E_BRAKE / T_BRAKE / (L * A_SEC)     # amplitude of q0 at t = 0
 print(f"FO = {FO:.3f}   BI = {BI:.3f}   S^ = {S_HAT:.3f}   TB^ = {TB_HAT:.4f}   dT_ref = {DT_REF:.0f} K")
 
 def power_hat(th):
@@ -75,18 +75,18 @@ def source_hat(zh, th):
     g = g / (SIG_HAT * np.sqrt(2 * np.pi)) / N_INTERFACE
     return Q_SCALE * power_hat(th) / (L * A_SEC) * g
 
-# ---------------------------------------------------------------- theta_p : serie de cosinus
+# ---------------------------------------------------------------- theta_p: cosine series
 N_MODES = 240
 n_ = torch.arange(N_MODES, dtype=DTYPE, device=DEV)                    # 0..N-1
 LAM = (n_ * np.pi)**2 * FO + S_HAT                                      # (K,)
-# coefficients g_n de la forme spatiale (moyenne des 8 gaussiennes, integrale 1)
+# coefficients g_n of the spatial shape (mean of the 8 Gaussians, integral 1)
 G_N = (torch.cos(np.pi * n_[None, :] * ZI_HAT[:, None]).mean(dim=0)
        * torch.exp(-0.5 * (np.pi * n_ * SIG_HAT)**2))
 G_N = torch.where(n_ == 0, torch.ones_like(G_N), 2 * G_N)               # g_0 = 1, g_n = 2 <g cos>
 
 def theta_particular(zh, th):
-    """Serie de cosinus (flux nul aux extremites + puits lateral), forme close
-    de A_n pour la puissance triangulaire q0(t') = Q0_MAX (1 - t'/TB)."""
+    """Cosine series (zero flux at the ends + lateral sink), closed form
+    of A_n for the triangular power q0(t') = Q0_MAX (1 - t'/TB)."""
     u = torch.clamp(th, max=TB_HAT)                                     # (N, 1)
     E_u = torch.exp(-LAM[None, :] * (th - u))                           # (N, K)
     E_t = torch.exp(-LAM[None, :] * th)
@@ -95,8 +95,8 @@ def theta_particular(zh, th):
     A = Q0_MAX * (I1 - I2 / TB_HAT)                                     # (N, K)
     return (A * G_N[None, :] * torch.cos(np.pi * n_[None, :] * zh)).sum(dim=1, keepdim=True)
 
-# ---------------------------------------------------------------- log-temps
-TAU_0 = 0.2 * TB_HAT        # echelle du log : lineaire en dessous, logarithmique au-dessus
+# ---------------------------------------------------------------- log-time
+TAU_0 = 0.2 * TB_HAT        # log scale: linear below, logarithmic above
 TAU_MAX = float(np.log1p(1.0 / TAU_0))
 
 def tau_of(th):
@@ -105,11 +105,11 @@ def tau_of(th):
 def t_of_tau(tau):
     return TAU_0 * torch.expm1(tau * TAU_MAX)
 
-# ---------------------------------------------------------------- reseau
-RAMP_HAT = 3 * TB_HAT      # montee de la correction (sa derivee 1/RAMP_HAT entre dans le residu)
+# ---------------------------------------------------------------- network
+RAMP_HAT = 3 * TB_HAT      # ramp-up of the correction (its derivative 1/RAMP_HAT enters the residual)
 FOURIER = True
 N_FF = 32
-FF_SCALE = (3.0, 2.0)       # (z^, tau) : correction lisse (la couche limite fine du freinage est sacrifiee)
+FF_SCALE = (3.0, 2.0)       # (z^, tau): smooth correction (the thin braking boundary layer is sacrificed)
 WIDTH, DEPTH = 64, 4
 
 class PINN(nn.Module):
@@ -142,13 +142,13 @@ def derivs(model, zh, th):
     theta_zz = torch.autograd.grad(theta_z, zh, torch.ones_like(theta_z), create_graph=True)[0]
     return theta, theta_z, theta_t, theta_zz
 
-# ---------------------------------------------------------------- echantillonnage
+# ---------------------------------------------------------------- sampling
 N_PDE, N_BC, RESAMPLE_EVERY = 4000, 400, 200
-W_PDE, W_BC, W_DATA = 1.0, 100.0, 1.0   # la CL de Robin est la seule information que le reseau doit porter : poids fort
+W_PDE, W_BC, W_DATA = 1.0, 100.0, 1.0   # the Robin BC is the only information the network must carry: high weight
 
 def sample_pde(n):
-    """Temps uniforme en tau (log-temps) ; z uniforme, plus points d'interface
-    pour les instants de freinage."""
+    """Time uniform in tau (log-time); z uniform, plus interface points
+    for the braking instants."""
     th = t_of_tau(torch.rand(n, 1))
     zh = torch.rand(n, 1)
     brake = (th < 1.5 * TB_HAT).squeeze()
@@ -168,7 +168,7 @@ z_sens = torch.full((len(d['t_sens']), 1), float(d['z_sensor']) / L, dtype=DTYPE
 t_sens = torch.tensor(d['t_sens'] / T_WINDOW, dtype=DTYPE, device=DEV)[:, None]
 th_sens = torch.tensor((d['T_sens'] - T_AMB) / DT_REF, dtype=DTYPE, device=DEV)[:, None]
 
-# ---------------------------------------------------------------- pertes
+# ---------------------------------------------------------------- losses
 def losses(model, zh, th, th_bc):
     theta, _, theta_t, theta_zz = derivs(model, zh, th)
     res = theta_t - FO * theta_zz - source_hat(zh, th) + S_HAT * theta
@@ -180,7 +180,7 @@ def losses(model, zh, th, th_bc):
     l_data = ((model(z_sens, t_sens) - th_sens)**2).mean() if USE_SENSOR else torch.tensor(0.0)
     return l_pde, l_bc, l_data
 
-# ---------------------------------------------------------------- entrainement
+# ---------------------------------------------------------------- training
 model = PINN().to(DEV)
 N_ADAM, N_LBFGS = 500, 3000
 hist = []
@@ -213,7 +213,7 @@ def closure():
     return loss
 
 opt.step(closure)
-print(f"L-BFGS termine : pde {hist[-1][0]:.2e}  bc {hist[-1][1]:.2e}  ({time.time() - t0_:.0f} s)")
+print(f"L-BFGS done: pde {hist[-1][0]:.2e}  bc {hist[-1][1]:.2e}  ({time.time() - t0_:.0f} s)")
 
 # ---------------------------------------------------------------- evaluation
 z_fd = d['z']
@@ -230,8 +230,8 @@ with torch.no_grad():
 T_pinn = T_AMB + DT_REF * theta.cpu().numpy().reshape(ZZ.shape)
 T_p = T_AMB + DT_REF * theta_p_only.cpu().numpy().reshape(ZZ.shape)
 err = T_pinn - T_fd
-print(f"\nRMSE global 0..2 h : {np.sqrt((err**2).mean()):.2f} K   max |err| : {np.abs(err).max():.1f} K")
-print("  t (s)   RMSE PINN   RMSE theta_p seule   T_moy FD / PINN / theta_p (C)")
+print(f"\nGlobal RMSE 0..2 h: {np.sqrt((err**2).mean()):.2f} K   max |err|: {np.abs(err).max():.1f} K")
+print("  t (s)   RMSE PINN   RMSE theta_p alone   T_mean FD / PINN / theta_p (C)")
 for tt_ in [10, 40, 120, 600, 1800, 3600, 7200]:
     i = min(np.searchsorted(t_fd, tt_), len(t_fd) - 1)
     print(f"  {tt_:5d}   {np.sqrt((err[i]**2).mean()):8.2f}   {np.sqrt(((T_p[i] - T_fd[i])**2).mean()):8.2f}"
@@ -243,23 +243,23 @@ fig, ax = plt.subplots(2, 2, figsize=(12, 8))
 ax[0, 0].semilogy(hist[:, 0], label='EDP')
 ax[0, 0].semilogy(hist[:, 1], label='CL')
 ax[0, 0].axvline(N_ADAM, color='k', lw=0.5)
-ax[0, 0].set(xlabel='iteration', ylabel='perte', title='Convergence')
+ax[0, 0].set(xlabel='iteration', ylabel='loss', title='Convergence')
 ax[0, 0].legend()
 
 for tt_, c in zip([10, 40, 120, 600, 1800, 7200], plt.cm.viridis(np.linspace(0, 1, 6))):
     i = min(np.searchsorted(t_fd, tt_), len(t_fd) - 1)
     ax[0, 1].plot(z_fd * 1e3, T_fd[i] - 273.15, color=c, label=f'FD {tt_} s')
     ax[0, 1].plot(z_fd * 1e3, T_pinn[i] - 273.15, '--', color=c)
-ax[0, 1].set(xlabel='z (mm)', ylabel='T (C)', title='Profils : FD (trait) vs PINN (tirets)')
+ax[0, 1].set(xlabel='z (mm)', ylabel='T (C)', title='Profiles: FD (solid) vs PINN (dashed)')
 ax[0, 1].legend(fontsize=10, ncol=2, framealpha=0.85)
 
 i_z = np.argmin(np.abs(z_fd - float(d['z_sensor'])))
-ax[1, 0].plot(t_fd / 60, T_fd[:, i_z] - 273.15, label='FD capteur')
-ax[1, 0].plot(t_fd / 60, T_pinn[:, i_z] - 273.15, '--', label='PINN capteur')
-ax[1, 0].plot(t_fd / 60, T_p[:, i_z] - 273.15, ':', label='theta_p seule (sans convection aux bouts)')
-ax[1, 0].plot(t_fd / 60, T_fd[:, 0] - 273.15, label='FD bord z = 0')
-ax[1, 0].plot(t_fd / 60, T_pinn[:, 0] - 273.15, '--', label='PINN bord z = 0')
-ax[1, 0].set(xlabel='t (min)', ylabel='T (C)', title='Historiques', xscale='log', xlim=(0.05, 120))
+ax[1, 0].plot(t_fd / 60, T_fd[:, i_z] - 273.15, label='FD sensor')
+ax[1, 0].plot(t_fd / 60, T_pinn[:, i_z] - 273.15, '--', label='PINN sensor')
+ax[1, 0].plot(t_fd / 60, T_p[:, i_z] - 273.15, ':', label='theta_p alone (no end convection)')
+ax[1, 0].plot(t_fd / 60, T_fd[:, 0] - 273.15, label='FD end z = 0')
+ax[1, 0].plot(t_fd / 60, T_pinn[:, 0] - 273.15, '--', label='PINN end z = 0')
+ax[1, 0].set(xlabel='t (min)', ylabel='T (C)', title='Time histories', xscale='log', xlim=(0.05, 120))
 ax[1, 0].legend(fontsize=10)
 
 emax = np.abs(err).max()
